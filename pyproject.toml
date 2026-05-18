@@ -1,0 +1,19 @@
+[project]
+name = "kokoro-tts-service"
+version = "0.1.0"
+description = "Standalone Kokoro TTS service with OpenAI-compatible /v1/audio/speech endpoint"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.116.0",
+  "uvicorn[standard]>=0.35.0",
+  "soundfile>=0.13.1",
+  "numpy>=2.2.0",
+  "kokoro>=0.9.4",
+]
+
+[tool.uv]
+package = false
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

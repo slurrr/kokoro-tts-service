@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kokoro Voice Lab</title>
+  <style>
+    body { font-family: Inter, system-ui, sans-serif; margin: 24px; max-width: 960px; }
+    h1 { margin-bottom: 8px; }
+    .row { display: grid; grid-template-columns: 180px 1fr; gap: 10px; align-items: center; margin: 10px 0; }
+    textarea, input, select, button { font: inherit; }
+    textarea { width: 100%; min-height: 120px; }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+    .muted { color: #555; font-size: 0.9rem; }
+    code { background: #f4f4f4; padding: 2px 6px; border-radius: 6px; }
+    #status { margin-top: 10px; white-space: pre-wrap; }
+    audio { width: 100%; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Kokoro Voice Lab</h1>
+  <div class="muted">Fast local A/B testing for voice + speed using your running service.</div>
+
+  <div class="row">
+    <label for="baseUrl">Base URL</label>
+    <input id="baseUrl" value="http://127.0.0.1:8880" />
+  </div>
+
+  <div class="row">
+    <label for="voice">Voice</label>
+    <select id="voice"></select>
+  </div>
+
+  <div class="row">
+    <label for="speed">Speed</label>
+    <div>
+      <input id="speed" type="range" min="0.7" max="1.4" step="0.01" value="1.0" />
+      <span id="speedVal">1.00</span>
+    </div>
+  </div>
+
+  <div class="row">
+    <label for="text">Text</label>
+    <textarea id="text">Hello! This is Kokoro voice testing at adjustable speed.</textarea>
+  </div>
+
+  <div class="controls">
+    <button type="button" id="refreshVoices">Refresh Voices</button>
+    <button type="button" id="speakBtn">Generate + Play</button>
+    <button type="button" id="downloadBtn" disabled>Download WAV</button>
+    <button type="button" id="copyPreset">Copy Preset JSON</button>
+  </div>
+
+  <audio id="player" controls></audio>
+  <div id="status" class="muted"></div>
+
+  <script>
+    const baseUrlEl = document.getElementById('baseUrl');
+    const voiceEl = document.getElementById('voice');
+    const speedEl = document.getElementById('speed');
+    const speedValEl = document.getElementById('speedVal');
+    const textEl = document.getElementById('text');
+    const statusEl = document.getElementById('status');
+    const playerEl = document.getElementById('player');
+    const downloadBtn = document.getElementById('downloadBtn');
+
+    let lastBlob = null;
+
+    const preferred = ["af_heart","af_bella","af_nicole","af_aoede","af_kore","af_sarah"];
+
+    function status(msg) { statusEl.textContent = msg; }
+    function baseUrl() { return baseUrlEl.value.replace(/\/+$/, ''); }
+
+    speedEl.addEventListener('input', () => {
+      speedValEl.textContent = Number(speedEl.value).toFixed(2);
+    });
+
+    async function refreshVoices() {
+      try {
+        status('Loading voices...');
+        const res = await fetch(`${baseUrl()}/v1/audio/voices`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const voices = Array.isArray(data.voices)
+          ? data.voices
+          : Array.isArray(data.data)
+            ? data.data.map(v => typeof v === 'string' ? v : (v.id || v.name)).filter(Boolean)
+            : [];
+
+        voiceEl.innerHTML = '';
+        const sorted = [...voices].sort((a,b) => {
+          const ai = preferred.indexOf(a);
+          const bi = preferred.indexOf(b);
+          if (ai !== -1 && bi !== -1) return ai - bi;
+          if (ai !== -1) return -1;
+          if (bi !== -1) return 1;
+          return a.localeCompare(b);
+        });
+
+        for (const v of sorted) {
+          const opt = document.createElement('option');
+          opt.value = v;
+          opt.textContent = v;
+          voiceEl.appendChild(opt);
+        }
+
+        if (preferred.includes('af_heart') && sorted.includes('af_heart')) {
+          voiceEl.value = 'af_heart';
+        }
+
+        status(`Loaded ${sorted.length} voices.`);
+      } catch (err) {
+        status(`Voice load failed: ${err.message}`);
+      }
+    }
+
+    async function synthesize() {
+      const payload = {
+        model: 'kokoro',
+        input: textEl.value,
+        voice: voiceEl.value,
+        response_format: 'wav',
+        speed: Number(speedEl.value)
+      };
+
+      status(`Generating: voice=${payload.voice} speed=${payload.speed.toFixed(2)} ...`);
+      const t0 = performance.now();
+      const res = await fetch(`${baseUrl()}/v1/audio/speech`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`HTTP ${res.status}: ${txt}`);
+      }
+      const blob = await res.blob();
+      const ms = Math.round(performance.now() - t0);
+
+      if (playerEl.src) URL.revokeObjectURL(playerEl.src);
+      const url = URL.createObjectURL(blob);
+      playerEl.src = url;
+      lastBlob = blob;
+      downloadBtn.disabled = false;
+      await playerEl.play().catch(() => {});
+      status(`Done in ${ms} ms. voice=${payload.voice} speed=${payload.speed.toFixed(2)} size=${Math.round(blob.size/1024)} KiB`);
+    }
+
+    document.getElementById('refreshVoices').addEventListener('click', refreshVoices);
+    document.getElementById('speakBtn').addEventListener('click', async () => {
+      status('Speak clicked...');
+      try {
+        await synthesize();
+      } catch (err) {
+        console.error('synthesize failed', err);
+        status(`Generate failed: ${err.message}`);
+      }
+    });
+
+    downloadBtn.addEventListener('click', () => {
+      if (!lastBlob) return;
+      const a = document.createElement('a');
+      const u = URL.createObjectURL(lastBlob);
+      const v = voiceEl.value || 'voice';
+      const s = Number(speedEl.value).toFixed(2);
+      a.href = u;
+      a.download = `kokoro-${v}-speed-${s}.wav`;
+      a.click();
+      URL.revokeObjectURL(u);
+    });
+
+    document.getElementById('copyPreset').addEventListener('click', async () => {
+      const preset = {
+        provider: 'kokoro-local',
+        base_url: baseUrl(),
+        model: 'kokoro',
+        voice: voiceEl.value,
+        speed: Number(speedEl.value)
+      };
+      const txt = JSON.stringify(preset, null, 2);
+      try {
+        await navigator.clipboard.writeText(txt);
+        status('Preset copied to clipboard.');
+      } catch {
+        status('Could not write clipboard. Preset:\n' + txt);
+      }
+    });
+
+    refreshVoices();
+  </script>
+</body>
+</html>
