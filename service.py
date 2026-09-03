@@ -123,6 +123,23 @@ def models() -> dict[str, Any]:
     return {"object": "list", "data": [{"id": "kokoro", "object": "model", "owned_by": "local"}]}
 
 
+@app.get("/v1/audio/capabilities")
+def audio_capabilities() -> dict[str, Any]:
+    return {
+        "provider": "kokoro",
+        "name": "Kokoro",
+        "protocol_version": 1,
+        "default_voice": DEFAULT_VOICE,
+        "speech_endpoint": "/v1/audio/speech",
+        "native_stream": {
+            "available": False,
+            "endpoint": "",
+            "cancel_endpoint": "",
+            "protocol": "",
+        },
+    }
+
+
 @app.get("/v1/audio/voice-map")
 def voice_map() -> dict[str, Any]:
     return {
