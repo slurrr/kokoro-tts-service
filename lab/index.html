@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Kokoro Voice Lab</title>
   <style>
-    body { font-family: Inter, system-ui, sans-serif; margin: 24px; max-width: 960px; }
+    body { font-family: Inter, system-ui, sans-serif; margin: 24px; max-width: 1040px; }
     h1 { margin-bottom: 8px; }
     .row { display: grid; grid-template-columns: 180px 1fr; gap: 10px; align-items: center; margin: 10px 0; }
     textarea, input, select, button { font: inherit; }
@@ -15,6 +15,9 @@
     code { background: #f4f4f4; padding: 2px 6px; border-radius: 6px; }
     #status { margin-top: 10px; white-space: pre-wrap; }
     audio { width: 100%; margin-top: 12px; }
+    .mix-box { border: 1px solid #ddd; border-radius: 10px; padding: 10px; background: #fafafa; }
+    .mix-row { display: grid; grid-template-columns: 240px 1fr 70px 34px; gap: 8px; align-items: center; margin: 6px 0; }
+    .mix-row input[type="range"] { width: 100%; }
   </style>
 </head>
 <body>
@@ -29,6 +32,24 @@
   <div class="row">
     <label for="voice">Voice</label>
     <select id="voice"></select>
+  </div>
+
+  <div class="row">
+    <label for="mixEnabled">Voice Mixer</label>
+    <div>
+      <label><input id="mixEnabled" type="checkbox" /> Enable weighted voice mix</label>
+    </div>
+  </div>
+
+  <div class="row" id="mixSection" style="display:none;">
+    <label>Mix</label>
+    <div class="mix-box">
+      <div id="mixRows"></div>
+      <div class="controls">
+        <button type="button" id="addMixRow">Add Voice</button>
+      </div>
+      <div class="muted">Weights always total 100%. Formula: <code id="mixFormula">af_heart:100</code></div>
+    </div>
   </div>
 
   <div class="row">
@@ -49,6 +70,38 @@
     <button type="button" id="speakBtn">Generate + Play</button>
     <button type="button" id="downloadBtn" disabled>Download WAV</button>
     <button type="button" id="copyPreset">Copy Preset JSON</button>
+    <button type="button" id="copyCurl">Copy cURL</button>
+  </div>
+
+  <div class="row">
+    <label for="presetSelect">Local Presets</label>
+    <div class="controls" style="margin-top:0;">
+      <select id="presetSelect" style="min-width: 260px;"></select>
+      <button type="button" id="savePreset">Save Preset</button>
+      <button type="button" id="loadPreset">Load</button>
+      <button type="button" id="deletePreset">Delete</button>
+      <button type="button" id="randomBlend">Random Blend</button>
+    </div>
+  </div>
+
+  <div class="row">
+    <label for="serverProfileSelect">Server Profiles</label>
+    <div class="controls" style="margin-top:0;">
+      <select id="serverProfileSelect" style="min-width: 260px;"></select>
+      <button type="button" id="saveServerProfile">Save to Server</button>
+      <button type="button" id="activateServerProfile">Set Default</button>
+      <button type="button" id="refreshServerProfiles">Refresh</button>
+    </div>
+  </div>
+
+  <div class="row">
+    <label>Voice-Agentd</label>
+    <div class="controls" style="margin-top:0;">
+      <input id="agentdBaseUrl" value="http://127.0.0.1:8893" style="min-width:260px" />
+      <button type="button" id="agentdUseDefault">Use Server Default</button>
+      <button type="button" id="agentdUseSelected">Use Selected Profile</button>
+      <button type="button" id="agentdUseExplicit">Use Explicit Voice/Speed</button>
+    </div>
   </div>
 
   <audio id="player" controls></audio>
@@ -63,17 +116,274 @@
     const statusEl = document.getElementById('status');
     const playerEl = document.getElementById('player');
     const downloadBtn = document.getElementById('downloadBtn');
+    const mixEnabledEl = document.getElementById('mixEnabled');
+    const mixSectionEl = document.getElementById('mixSection');
+    const mixRowsEl = document.getElementById('mixRows');
+    const mixFormulaEl = document.getElementById('mixFormula');
+    const presetSelectEl = document.getElementById('presetSelect');
+    const serverProfileSelectEl = document.getElementById('serverProfileSelect');
+    const agentdBaseUrlEl = document.getElementById('agentdBaseUrl');
+
+    const PRESET_KEY = 'kokoro_voice_lab_presets_v1';
 
     let lastBlob = null;
+    let allVoices = [];
+    let mixRows = [{ voice: 'af_heart', weight: 100 }];
 
     const preferred = ["af_heart","af_bella","af_nicole","af_aoede","af_kore","af_sarah"];
 
     function status(msg) { statusEl.textContent = msg; }
     function baseUrl() { return baseUrlEl.value.replace(/\/+$/, ''); }
+    function agentdBaseUrl() { return agentdBaseUrlEl.value.replace(/\/+$/, ''); }
+
+    function currentVoiceSpec() {
+      return mixEnabledEl.checked ? formulaFromMix() : voiceEl.value;
+    }
+
+    function currentPresetObject() {
+      return {
+        provider: 'kokoro-local',
+        base_url: baseUrl(),
+        model: 'kokoro',
+        voice: currentVoiceSpec(),
+        speed: Number(speedEl.value),
+        mix_enabled: !!mixEnabledEl.checked,
+        mix_rows: mixRows.map(r => ({ voice: r.voice, weight: r.weight }))
+      };
+    }
+
+    function loadPresetStore() {
+      try {
+        return JSON.parse(localStorage.getItem(PRESET_KEY) || '{}');
+      } catch {
+        return {};
+      }
+    }
+
+    function savePresetStore(store) {
+      localStorage.setItem(PRESET_KEY, JSON.stringify(store));
+    }
+
+    function refreshPresetSelect() {
+      const store = loadPresetStore();
+      const names = Object.keys(store).sort();
+      presetSelectEl.innerHTML = '';
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = names.length ? 'Select preset…' : 'No presets yet';
+      presetSelectEl.appendChild(placeholder);
+      for (const name of names) {
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = name;
+        presetSelectEl.appendChild(opt);
+      }
+    }
+
+    function applyPreset(preset) {
+      if (!preset || typeof preset !== 'object') return;
+      if (typeof preset.base_url === 'string' && preset.base_url) baseUrlEl.value = preset.base_url;
+      if (typeof preset.speed === 'number') {
+        speedEl.value = String(preset.speed);
+        speedValEl.textContent = Number(speedEl.value).toFixed(2);
+      }
+      mixEnabledEl.checked = !!preset.mix_enabled;
+      mixSectionEl.style.display = mixEnabledEl.checked ? '' : 'none';
+
+      if (Array.isArray(preset.mix_rows) && preset.mix_rows.length) {
+        mixRows = preset.mix_rows.map(r => ({
+          voice: allVoices.includes(r.voice) ? r.voice : (allVoices[0] || 'af_heart'),
+          weight: Math.max(0, Math.min(100, Number(r.weight) || 0))
+        }));
+        normalize100();
+        renderMixRows();
+      }
+
+      if (typeof preset.voice === 'string' && preset.voice) {
+        if (preset.voice.includes(':') || preset.voice.includes(',')) {
+          mixEnabledEl.checked = true;
+          mixSectionEl.style.display = '';
+          const parts = preset.voice.split(',').map(x => x.trim()).filter(Boolean);
+          const rows = [];
+          for (const part of parts) {
+            const [v, w] = part.split(':');
+            if (v && w !== undefined) rows.push({ voice: v, weight: Number(w) || 0 });
+            else if (v) rows.push({ voice: v, weight: 1 });
+          }
+          if (rows.length) {
+            mixRows = rows.map(r => ({
+              voice: allVoices.includes(r.voice) ? r.voice : (allVoices[0] || 'af_heart'),
+              weight: r.weight
+            }));
+            normalize100();
+            renderMixRows();
+          }
+        } else if (allVoices.includes(preset.voice)) {
+          voiceEl.value = preset.voice;
+        }
+      }
+    }
+
+    function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+    function normalize100() {
+      const sum = mixRows.reduce((a, r) => a + r.weight, 0);
+      if (sum <= 0) {
+        mixRows = mixRows.map((r, i) => ({...r, weight: i === 0 ? 100 : 0 }));
+        return;
+      }
+      let scaled = mixRows.map(r => ({...r, weight: Math.round((r.weight / sum) * 100)}));
+      let diff = 100 - scaled.reduce((a, r) => a + r.weight, 0);
+      let i = 0;
+      while (diff !== 0 && scaled.length > 0) {
+        const idx = i % scaled.length;
+        if (diff > 0 && scaled[idx].weight < 100) { scaled[idx].weight += 1; diff -= 1; }
+        else if (diff < 0 && scaled[idx].weight > 0) { scaled[idx].weight -= 1; diff += 1; }
+        i++;
+        if (i > 1000) break;
+      }
+      mixRows = scaled;
+    }
+
+    function rebalanceFrom(index, desired) {
+      desired = clamp(Math.round(desired), 0, 100);
+      const old = mixRows[index].weight;
+      const delta = desired - old;
+      if (delta === 0) return;
+
+      const others = mixRows.map((_, i) => i).filter(i => i !== index);
+      if (!others.length) {
+        mixRows[index].weight = 100;
+        return;
+      }
+
+      if (delta > 0) {
+        let remaining = delta;
+        while (remaining > 0) {
+          const donors = others.filter(i => mixRows[i].weight > 0);
+          if (!donors.length) break;
+          const step = Math.max(1, Math.floor(remaining / donors.length));
+          for (const i of donors) {
+            if (remaining <= 0) break;
+            const take = Math.min(mixRows[i].weight, step, remaining);
+            mixRows[i].weight -= take;
+            remaining -= take;
+          }
+        }
+        mixRows[index].weight = old + (delta - remaining);
+      } else {
+        let give = -delta;
+        mixRows[index].weight = old - give;
+        while (give > 0) {
+          const receivers = others.filter(i => mixRows[i].weight < 100);
+          if (!receivers.length) break;
+          const step = Math.max(1, Math.floor(give / receivers.length));
+          for (const i of receivers) {
+            if (give <= 0) break;
+            const room = 100 - mixRows[i].weight;
+            const add = Math.min(room, step, give);
+            mixRows[i].weight += add;
+            give -= add;
+          }
+        }
+      }
+      normalize100();
+    }
+
+    function formulaFromMix() {
+      return mixRows
+        .filter(r => r.weight > 0)
+        .map(r => `${r.voice}:${r.weight}`)
+        .join(',') || `${voiceEl.value}:100`;
+    }
+
+    function renderMixRows() {
+      mixRowsEl.innerHTML = '';
+      mixRows.forEach((row, idx) => {
+        const wrap = document.createElement('div');
+        wrap.className = 'mix-row';
+
+        const sel = document.createElement('select');
+        for (const v of allVoices) {
+          const opt = document.createElement('option');
+          opt.value = v;
+          opt.textContent = v;
+          sel.appendChild(opt);
+        }
+        if (allVoices.includes(row.voice)) sel.value = row.voice;
+        sel.addEventListener('change', () => {
+          mixRows[idx].voice = sel.value;
+          renderMixRows();
+        });
+
+        const rng = document.createElement('input');
+        rng.type = 'range';
+        rng.min = '0'; rng.max = '100'; rng.step = '1';
+        rng.value = String(row.weight);
+        rng.addEventListener('input', () => {
+          rebalanceFrom(idx, Number(rng.value));
+          renderMixRows();
+        });
+
+        const val = document.createElement('div');
+        val.textContent = `${row.weight}%`;
+
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.textContent = '×';
+        del.disabled = mixRows.length <= 1;
+        del.addEventListener('click', () => {
+          if (mixRows.length <= 1) return;
+          mixRows.splice(idx, 1);
+          normalize100();
+          renderMixRows();
+        });
+
+        wrap.appendChild(sel);
+        wrap.appendChild(rng);
+        wrap.appendChild(val);
+        wrap.appendChild(del);
+        mixRowsEl.appendChild(wrap);
+      });
+
+      mixFormulaEl.textContent = formulaFromMix();
+    }
 
     speedEl.addEventListener('input', () => {
       speedValEl.textContent = Number(speedEl.value).toFixed(2);
     });
+
+    mixEnabledEl.addEventListener('change', () => {
+      mixSectionEl.style.display = mixEnabledEl.checked ? '' : 'none';
+    });
+
+    document.getElementById('addMixRow').addEventListener('click', () => {
+      const pick = allVoices.find(v => !mixRows.some(r => r.voice === v)) || allVoices[0] || voiceEl.value;
+      mixRows.push({ voice: pick, weight: 0 });
+      normalize100();
+      renderMixRows();
+    });
+
+    async function refreshServerProfiles() {
+      try {
+        const res = await fetch(`${baseUrl()}/v1/audio/profiles`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const active = data.active || '';
+        const profiles = (data.profiles && typeof data.profiles === 'object') ? data.profiles : {};
+        const names = Object.keys(profiles).sort();
+        serverProfileSelectEl.innerHTML = '';
+        for (const n of names) {
+          const opt = document.createElement('option');
+          opt.value = n;
+          opt.textContent = n + (n === active ? ' (default)' : '');
+          serverProfileSelectEl.appendChild(opt);
+        }
+        if (active && names.includes(active)) serverProfileSelectEl.value = active;
+      } catch (err) {
+        status(`Server profile refresh failed: ${err.message}`);
+      }
+    }
 
     async function refreshVoices() {
       try {
@@ -108,17 +418,23 @@
           voiceEl.value = 'af_heart';
         }
 
+        allVoices = sorted;
+        mixRows = [{ voice: voiceEl.value || sorted[0] || 'af_heart', weight: 100 }];
+        renderMixRows();
+
         status(`Loaded ${sorted.length} voices.`);
+        await refreshServerProfiles();
       } catch (err) {
         status(`Voice load failed: ${err.message}`);
       }
     }
 
     async function synthesize() {
+      const voiceSpec = currentVoiceSpec();
       const payload = {
         model: 'kokoro',
         input: textEl.value,
-        voice: voiceEl.value,
+        voice: voiceSpec,
         response_format: 'wav',
         speed: Number(speedEl.value)
       };
@@ -161,7 +477,7 @@
       if (!lastBlob) return;
       const a = document.createElement('a');
       const u = URL.createObjectURL(lastBlob);
-      const v = voiceEl.value || 'voice';
+      const v = mixEnabledEl.checked ? 'mix' : (voiceEl.value || 'voice');
       const s = Number(speedEl.value).toFixed(2);
       a.href = u;
       a.download = `kokoro-${v}-speed-${s}.wav`;
@@ -170,13 +486,7 @@
     });
 
     document.getElementById('copyPreset').addEventListener('click', async () => {
-      const preset = {
-        provider: 'kokoro-local',
-        base_url: baseUrl(),
-        model: 'kokoro',
-        voice: voiceEl.value,
-        speed: Number(speedEl.value)
-      };
+      const preset = currentPresetObject();
       const txt = JSON.stringify(preset, null, 2);
       try {
         await navigator.clipboard.writeText(txt);
@@ -186,6 +496,130 @@
       }
     });
 
+    document.getElementById('copyCurl').addEventListener('click', async () => {
+      const payload = {
+        model: 'kokoro',
+        input: textEl.value,
+        voice: currentVoiceSpec(),
+        response_format: 'wav',
+        speed: Number(speedEl.value)
+      };
+      const cmd = `curl -sS -X POST ${baseUrl()}/v1/audio/speech -H 'content-type: application/json' -d '${JSON.stringify(payload).replace(/'/g, "'\\''")}' --output kokoro.wav`;
+      try {
+        await navigator.clipboard.writeText(cmd);
+        status('cURL command copied to clipboard.');
+      } catch {
+        status('Could not write clipboard.\n' + cmd);
+      }
+    });
+
+    document.getElementById('savePreset').addEventListener('click', () => {
+      const name = prompt('Preset name?');
+      if (!name) return;
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      const store = loadPresetStore();
+      store[trimmed] = currentPresetObject();
+      savePresetStore(store);
+      refreshPresetSelect();
+      presetSelectEl.value = trimmed;
+      status(`Saved preset: ${trimmed}`);
+    });
+
+    document.getElementById('loadPreset').addEventListener('click', () => {
+      const name = presetSelectEl.value;
+      if (!name) return;
+      const store = loadPresetStore();
+      const preset = store[name];
+      if (!preset) return;
+      applyPreset(preset);
+      status(`Loaded preset: ${name}`);
+    });
+
+    document.getElementById('deletePreset').addEventListener('click', () => {
+      const name = presetSelectEl.value;
+      if (!name) return;
+      const store = loadPresetStore();
+      if (!(name in store)) return;
+      delete store[name];
+      savePresetStore(store);
+      refreshPresetSelect();
+      status(`Deleted preset: ${name}`);
+    });
+
+    document.getElementById('saveServerProfile').addEventListener('click', async () => {
+      const name = prompt('Server profile name? (e.g. pi, pi-ghosty)');
+      if (!name) return;
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      const payload = { voice: currentVoiceSpec(), speed: Number(speedEl.value) };
+      const res = await fetch(`${baseUrl()}/v1/audio/profiles/${encodeURIComponent(trimmed)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        status(`Save server profile failed: HTTP ${res.status}`);
+        return;
+      }
+      await refreshServerProfiles();
+      serverProfileSelectEl.value = trimmed;
+      status(`Saved server profile: ${trimmed}`);
+    });
+
+    document.getElementById('activateServerProfile').addEventListener('click', async () => {
+      const name = serverProfileSelectEl.value;
+      if (!name) return;
+      const res = await fetch(`${baseUrl()}/v1/audio/profiles/${encodeURIComponent(name)}/activate`, { method: 'POST' });
+      if (!res.ok) {
+        status(`Set default failed: HTTP ${res.status}`);
+        return;
+      }
+      await refreshServerProfiles();
+      status(`Default server profile set: ${name}`);
+    });
+
+    document.getElementById('refreshServerProfiles').addEventListener('click', refreshServerProfiles);
+
+    document.getElementById('agentdUseDefault').addEventListener('click', async () => {
+      const res = await fetch(`${agentdBaseUrl()}/v1/voice/tts/set`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ use_server_defaults: true, profile: '' })
+      });
+      status(res.ok ? 'voice-agentd set to use active server default profile.' : `voice-agentd update failed: HTTP ${res.status}`);
+    });
+
+    document.getElementById('agentdUseSelected').addEventListener('click', async () => {
+      const name = serverProfileSelectEl.value;
+      if (!name) return status('Pick a server profile first.');
+      const res = await fetch(`${agentdBaseUrl()}/v1/voice/tts/set`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ use_server_defaults: true, profile: name })
+      });
+      status(res.ok ? `voice-agentd now pinned to profile: ${name}` : `voice-agentd update failed: HTTP ${res.status}`);
+    });
+
+    document.getElementById('agentdUseExplicit').addEventListener('click', async () => {
+      const res = await fetch(`${agentdBaseUrl()}/v1/voice/tts/set`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ use_server_defaults: false, voice: currentVoiceSpec(), speed: Number(speedEl.value) })
+      });
+      status(res.ok ? 'voice-agentd set to explicit voice/speed from lab.' : `voice-agentd update failed: HTTP ${res.status}`);
+    });
+
+    document.getElementById('randomBlend').addEventListener('click', () => {
+      if (!allVoices.length) return;
+      const count = Math.min(4, Math.max(2, Math.floor(Math.random() * 4) + 1));
+      const shuffled = [...allVoices].sort(() => Math.random() - 0.5).slice(0, count);
+      mixRows = shuffled.map(v => ({ voice: v, weight: 1 }));
+      normalize100();
+      mixEnabledEl.checked = true;
+      mixSectionEl.style.display = '';
+      renderMixRows();
+      status(`Random blend created (${count} voices).`);
+    });
+
+    refreshPresetSelect();
     refreshVoices();
   </script>
 </body>
