@@ -1,4 +1,16 @@
 __pycache__/
-*.pyc
+*.py[cod]
 .venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.env
+.env.*
 *.log
+*.wav
+.DS_Store

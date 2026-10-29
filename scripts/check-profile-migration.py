@@ -18,6 +18,13 @@ from typing import Any
 DEFAULT_STORE = Path.home() / "runs" / "kokoro-tts" / "profiles.json"
 
 
+def default_store_data() -> dict[str, Any]:
+    return {
+        "active": "default",
+        "profiles": {"default": {"voice": "af_heart", "speed": 1.0}},
+    }
+
+
 def read_store(path: Path) -> tuple[bytes, dict[str, Any]]:
     raw = path.read_bytes()
     data = json.loads(raw)
@@ -31,7 +38,17 @@ def main() -> None:
     parser.add_argument("--store", type=Path, default=DEFAULT_STORE)
     args = parser.parse_args()
 
-    source_raw, source = read_store(args.store)
+    real_store = args.store.exists()
+    synthetic_dir = None
+    if real_store:
+        source_path = args.store
+    else:
+        synthetic_dir = tempfile.TemporaryDirectory(prefix="kokoro-profile-source-")
+        source_path = Path(synthetic_dir.name) / "profiles.json"
+        source_path.write_text(json.dumps(default_store_data(), indent=2) + "\n")
+        print(f"no profile store at {args.store}; using temporary defaults")
+
+    source_raw, source = read_store(source_path)
     source_profiles = source["profiles"]
     source_active = str(source.get("active") or "default")
     if not source_profiles or source_active not in source_profiles:
@@ -103,7 +120,10 @@ def main() -> None:
             assert generated[-1] == (other_profile["voice"], float(other_profile["speed"]))
             assert after_raw != source_raw  # active selection was intentionally changed
 
-    assert args.store.read_bytes() == source_raw
+    if real_store:
+        assert args.store.read_bytes() == source_raw
+    if synthetic_dir is not None:
+        synthetic_dir.cleanup()
     print(
         "profile migration ok: "
         f"active={source_active} profiles={','.join(source_profiles)} "

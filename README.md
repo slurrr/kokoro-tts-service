@@ -1,77 +1,159 @@
-# Kokoro TTS service
+# kokoro-tts-service
 
-Provider-owned Kokoro HTTP service. The shared voice loop sends only the
-completed-audio transport fields (`input` and `response_format: "wav"`); this
-service applies the active profile when no provider-native voice, speed, or
-profile is supplied.
+A self-hosted text-to-speech HTTP service built on
+[Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M). It exposes an
+OpenAI-compatible `POST /v1/audio/speech` endpoint that returns WAV audio, so
+local voice clients can use a familiar API without a hosted TTS provider. Named
+voice profiles, OpenAI voice aliases and weighted voice blends are managed by
+the service.
+
+## Requirements
+
+- Python 3.11 or newer
+- [uv](https://docs.astral.sh/uv/)
+- Network access on first run to download the Kokoro weights (about 330 MB)
+  from Hugging Face. `GET /health` and `GET /v1/audio/voices` also call
+  `list_repo_files()`, so those endpoints need network access even when the
+  model is already cached.
+- CUDA is optional; the default device is `cpu`.
+
+## Install
+
+```bash
+uv sync
+```
 
 ## Run
 
-The existing launcher controls the runtime environment and keeps the default
-CPU/GPU behavior:
-
 ```bash
-kokoro-tts-serve --bg       # add --gpu for CUDA
+uv run uvicorn service:app --host 127.0.0.1 --port 8880
 ```
 
-For a direct foreground run:
+This is a plain ASGI application, so any ASGI server can host it. With the
+default `KOKORO_WARMUP=1` the service synthesizes a short phrase at startup;
+set `KOKORO_WARMUP=0` to skip that.
+
+## Example
 
 ```bash
-uv run --project ~/code/dev/kokoro-tts-service \
-  uvicorn service:app --host 127.0.0.1 --port 8880
-```
-
-Important environment variables remain provider-local:
-
-- `KOKORO_MODEL`
-- `KOKORO_LANG`
-- `KOKORO_VOICE`
-- `KOKORO_SPEED`
-- `KOKORO_DEVICE`
-- `KOKORO_WARMUP` (`1` by default)
-- `KOKORO_PROFILE_STORE` (defaults to `~/runs/kokoro-tts/profiles.json`)
-
-## Provider management
-
-The profile store is not read or written by `voice-agentd`, `the-stack`, or
-Agent TUI. Use the provider API or the Voice Lab at `/lab/`:
-
-```bash
-curl http://127.0.0.1:8880/v1/audio/profiles
-curl http://127.0.0.1:8880/v1/audio/defaults
-curl -X PUT http://127.0.0.1:8880/v1/audio/profiles/<name> \
+curl -sS -X POST http://127.0.0.1:8880/v1/audio/speech \
   -H 'content-type: application/json' \
-  -d '{"voice":"af_heart","speed":1.0}'
-curl -X POST http://127.0.0.1:8880/v1/audio/profiles/<name>/activate
+  -d '{"input": "Hello from Kokoro.", "response_format": "wav"}' \
+  --output hello.wav
+
+file hello.wav
+# hello.wav: RIFF (little-endian) data, WAVE audio, 16 bit, mono 24000 Hz
 ```
 
-`~/runs/kokoro-tts/profiles.json` is an existing provider data store and is
-preserved in place. Profile voice values support Kokoro voice IDs, OpenAI
-aliases, equal blends (`voice_a,voice_b`), and weighted blends
-(`voice_a:70,voice_b:30`). The service owns validation and translation of
-these values.
+A request with only `input` uses the active profile for voice and speed.
+Provider-native fields may be sent explicitly:
 
-## Compatibility and transport APIs
+```bash
+curl -sS -X POST http://127.0.0.1:8880/v1/audio/speech \
+  -H 'content-type: application/json' \
+  -d '{"input": "A faster voice.", "voice": "af_bella", "speed": 1.2}' \
+  --output faster.wav
+```
 
-The service retains the `/health`, `/v1/models`, `/v1/audio/models`,
-`/v1/audio/voices`, `/v1/audio/voice-map`, `/v1/audio/defaults`,
-`/v1/audio/profiles`, and `/v1/audio/speech` APIs, plus the Azure-compatible
-route. `GET /v1/audio/capabilities` advertises completed WAV transport and no
-native stream.
+## Endpoints
 
-A request with only `input` and `response_format: "wav"` uses the active
-profile. Provider-native requests may supply `profile`, `voice`, or `speed`
-for explicit provider management/testing. The loop and generic clients never
-send those fields.
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | Status, model, device and voice count |
+| `GET` | `/v1/models` | OpenAI-style model list |
+| `GET` | `/v1/audio/models` | Model ids served |
+| `GET` | `/v1/audio/voices` | Available Kokoro voices |
+| `GET` | `/v1/audio/voice-map` | OpenAI alias to Kokoro voice mapping |
+| `GET` | `/v1/audio/defaults` | Active profile's voice and speed |
+| `GET` | `/v1/audio/profiles` | All profiles and the active name |
+| `PUT` | `/v1/audio/profiles/{name}` | Create or replace a profile |
+| `POST` | `/v1/audio/profiles/{name}/activate` | Select the active profile |
+| `POST` | `/v1/audio/speech` | Synthesize WAV audio |
+| `GET` | `/v1/audio/capabilities` | Advertised transport capabilities |
+| `POST` | `/cognitiveservices/v1` | Azure-compatible synthesis route |
+
+## Profiles and voices
+
+Profiles live in a JSON store at `KOKORO_PROFILE_STORE`, by default
+`~/runs/kokoro-tts/profiles.json`. The service creates the file and its parent
+directory on first use. It is provider-owned state: back it up if you care about
+the profiles.
+
+```bash
+curl -sS http://127.0.0.1:8880/v1/audio/profiles
+curl -sS -X PUT http://127.0.0.1:8880/v1/audio/profiles/narrator \
+  -H 'content-type: application/json' \
+  -d '{"voice": "af_heart", "speed": 1.0}'
+curl -sS -X POST http://127.0.0.1:8880/v1/audio/profiles/narrator/activate
+```
+
+Profile and request voice values accept:
+
+- a Kokoro voice id, such as `af_heart`;
+- an OpenAI alias, such as `alloy` (see `/v1/audio/voice-map`);
+- an equal blend, such as `af_heart,af_bella`;
+- a weighted blend, such as `af_heart:70,af_bella:30`.
+
+## Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `KOKORO_MODEL` | `hexgrad/Kokoro-82M` | Hugging Face model id or local path |
+| `KOKORO_LANG` | `a` | Kokoro language code |
+| `KOKORO_VOICE` | `af_heart` | Fallback voice |
+| `KOKORO_SPEED` | `1.0` | Fallback speed |
+| `KOKORO_DEVICE` | `cpu` | `cpu` or `cuda` |
+| `KOKORO_WARMUP` | `1` | Synthesize a warmup phrase at startup |
+| `KOKORO_PROFILE_STORE` | `~/runs/kokoro-tts/profiles.json` | Profile store path |
+
+## Voice Lab
+
+The service serves a static browser playground at `/lab/`, for example
+`http://127.0.0.1:8880/lab/`. It defaults to a service at
+`http://127.0.0.1:8880` and includes optional buttons that point a separate
+`voice-agentd` instance, expected at `http://127.0.0.1:8893`, at the selected
+profile. `voice-agentd` is not part of this repository; the synthesis and
+profile controls work without it.
 
 ## Migration check
 
-Run this before and after service changes. It copies the real store to a
-temporary path, exercises profile discovery, active-profile synthesis
-resolution, and profile activation, then verifies that the real store is
-byte-for-byte unchanged and all profile records survive:
+`scripts/check-profile-migration.py` exercises profile discovery, active-profile
+resolution and profile activation against a temporary copy of the store. It
+never writes the real store and needs no model download.
 
 ```bash
-uv run --project ~/code/dev/kokoro-tts-service \
-  python scripts/check-profile-migration.py
+uv run python scripts/check-profile-migration.py
 ```
+
+If `KOKORO_PROFILE_STORE` / `--store` points at an existing store, that store is
+copied and verified byte-for-byte unchanged at the end. If it does not exist,
+the check uses a temporary default store and prints a note. Expected output ends
+with a line beginning `profile migration ok:`.
+
+## Verify
+
+On a fresh clone, after `uv sync`:
+
+```bash
+uv run python scripts/check-profile-migration.py
+```
+
+Then start the service and request one phrase:
+
+```bash
+curl -sS http://127.0.0.1:8880/health
+curl -sS -X POST http://127.0.0.1:8880/v1/audio/speech \
+  -H 'content-type: application/json' \
+  -d '{"input": "verification", "response_format": "wav"}' \
+  --output /tmp/kokoro-check.wav
+file /tmp/kokoro-check.wav
+```
+
+The health response should report `"status": "ok"` and the output file should be
+recognised as WAV audio.
+
+## License
+
+MIT for this service; see [LICENSE](LICENSE). The Kokoro-82M model weights and
+the `kokoro` Python package are distributed separately under their own licences
+(Apache-2.0 for the model).
