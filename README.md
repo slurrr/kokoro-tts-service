@@ -9,7 +9,8 @@ the service.
 
 ## Requirements
 
-- Python 3.11 or newer
+- Python 3.11, pinned in `.python-version`; the `kokoro` dependency chain
+  does not yet publish Python 3.14 wheels
 - [uv](https://docs.astral.sh/uv/)
 - Network access on first run to download the Kokoro weights (about 330 MB)
   from Hugging Face. `GET /health` and `GET /v1/audio/voices` also call
